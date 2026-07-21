@@ -94,6 +94,16 @@ def init_rfid_reader():
 # -------------------------
 app = Flask(__name__)
 
+
+@app.after_request
+def disable_cache(response):
+    if response.content_type and "text/html" in response.content_type:
+        response.headers["Cache-Control"] = "no-store, no-cache, must-revalidate, max-age=0"
+        response.headers["Pragma"] = "no-cache"
+        response.headers["Expires"] = "0"
+    return response
+
+
 latest_scan = {
     "scan_id": 0,
     "uid": None,
@@ -212,6 +222,7 @@ HTML = """
 <html>
 <head>
 <meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
 <title>Paarth RFID Terminal</title>
 
 <style>
@@ -275,12 +286,14 @@ HTML = """
     background: radial-gradient(circle at center, var(--bg-start) 0%, var(--bg-end) 70%);
     color: var(--text-primary);
     font-family: "Courier New", monospace;
-    height: 100vh;
+    min-height: 100vh;
     overflow: hidden;
     display: flex;
     flex-direction: column;
     align-items: center;
     justify-content: center;
+    gap: 24px;
+    padding: 24px 20px 32px;
     transition: background 0.3s ease, color 0.3s ease;
   }
 
@@ -313,35 +326,37 @@ HTML = """
     cursor: pointer;
   }
 
-  .header {
-    position: fixed;
-    top: 28px;
-    left: 50px;
-    right: 50px;
-    display: flex;
-    justify-content: center;
-    align-items: flex-start;
-  }
-
-  .clock {
+  .clock-block {
     text-align: center;
-    color: var(--text-muted);
-    font-size: 10px;
-    letter-spacing: 2px;
+    z-index: 10;
+    width: 100%;
+    flex-shrink: 0;
   }
 
-  .clock span {
+  #clock-val {
     display: block;
     color: var(--text-primary);
-    font-size: 18px;
+    font-size: 64px;
+    font-weight: bold;
     letter-spacing: 3px;
-    margin-bottom: 5px;
+    margin-bottom: 8px;
+    line-height: 1;
+  }
+
+  #clock-date {
+    display: block;
+    color: var(--text-muted);
+    font-size: 32px;
+    letter-spacing: 1px;
+    line-height: 1.15;
+    font-weight: 600;
   }
 
   .rfid-stage {
     position: relative;
-    width: 620px;
-    height: 620px;
+    width: min(620px, 88vw);
+    height: min(620px, 55vh);
+    flex-shrink: 1;
     display: flex;
     align-items: center;
     justify-content: center;
@@ -414,12 +429,12 @@ HTML = """
 
   .prompt {
     text-align: center;
-    margin-top: 35px;
+    flex-shrink: 0;
   }
 
   .prompt-sub {
     margin-top: 10px;
-    font-size: 11px;
+    font-size: 18px;
     letter-spacing: 2px;
     color: var(--text-muted);
   }
@@ -439,8 +454,8 @@ HTML = """
   }
 
   .scan-card {
-    min-width: 520px;
-    padding: 45px 60px;
+    min-width: min(92vw, 820px);
+    padding: 50px 60px 55px;
     border: 1px solid var(--card-border);
     background: var(--card-bg);
     text-align: center;
@@ -475,16 +490,19 @@ HTML = """
   }
 
   .card-time {
-    font-size: 40px;
+    font-size: 68px;
     font-weight: bold;
     color: var(--text-primary);
-    margin-bottom: 10px;
+    margin-bottom: 14px;
+    line-height: 1;
   }
 
   .card-date {
-    font-size: 13px;
+    font-size: 34px;
     color: var(--text-muted);
-    margin-bottom: 22px;
+    margin-bottom: 24px;
+    line-height: 1.15;
+    font-weight: 600;
   }
 
   .card-uid {
@@ -580,10 +598,9 @@ HTML = """
 
 <button class="theme-toggle" id="theme-toggle" type="button">LIGHT MODE</button>
 
-<div class="header">
-  <div class="clock">
-    <span id="clock-val">--:--:--</span>
-  </div>
+<div class="clock-block">
+  <span id="clock-val">--:--:--</span>
+  <span id="clock-date">—</span>
 </div>
 
 <div class="rfid-stage">
@@ -646,6 +663,13 @@ HTML = """
         hour: "2-digit",
         minute: "2-digit",
         second: "2-digit"
+      });
+    document.getElementById("clock-date").textContent =
+      now.toLocaleDateString([], {
+        weekday: "long",
+        month: "long",
+        day: "numeric",
+        year: "numeric"
       });
   }
 
