@@ -1,0 +1,7 @@
+flask
+requests
+python-dotenv
+
+# Raspberry Pi only (install on the Pi, not your laptop):
+# mfrc522
+# RPi.GPIO
