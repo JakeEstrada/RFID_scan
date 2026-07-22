@@ -136,7 +136,7 @@ def normalize_pin(raw):
 
 def submit_to_paarth(payload):
     if not TENANT_ID or not API_KEY:
-        return "Config Error", "Set TENANT_ID and API_KEY in .env"
+        return "Config Error", "Set TENANT_ID and API_KEY in .env", None
 
     try:
         response = requests.post(
@@ -150,18 +150,22 @@ def submit_to_paarth(payload):
             data = response.json()
             scan = data.get("scan", {})
             name = scan.get("displayName", "Unknown")
-            print(f"Logged in Paarth: {name}", flush=True)
-            return name, None
+            week_hours = scan.get("weekTotalHours")
+            if week_hours is not None:
+                print(f"Logged in Paarth: {name} ({week_hours} hrs this week)", flush=True)
+            else:
+                print(f"Logged in Paarth: {name}", flush=True)
+            return name, None, week_hours
 
         print("Paarth error:", response.status_code, response.text, flush=True)
-        return "Server Error", response.text
+        return "Server Error", response.text, None
 
     except Exception as e:
         print("Network error:", e, flush=True)
-        return "Network Error", str(e)
+        return "Network Error", str(e), None
 
 
-def record_scan_result(name, uid=None, pin=None, method="rfid"):
+def record_scan_result(name, uid=None, pin=None, method="rfid", week_hours=None):
     global latest_scan, scan_counter
 
     local_now = datetime.now()
@@ -176,6 +180,7 @@ def record_scan_result(name, uid=None, pin=None, method="rfid"):
         "date": local_now.strftime("%A, %B %d, %Y"),
         "status": "Scan logged",
         "method": method,
+        "weekHours": week_hours,
     }
 
 
@@ -205,8 +210,8 @@ def scan_loop():
                         "deviceLabel": DEVICE_LABEL,
                     }
 
-                    name, _err = submit_to_paarth(payload)
-                    record_scan_result(name, uid=uid_string, method="rfid")
+                    name, _err, week_hours = submit_to_paarth(payload)
+                    record_scan_result(name, uid=uid_string, method="rfid", week_hours=week_hours)
 
                     last_uid = uid_string
                     last_scan_time = now
@@ -500,9 +505,42 @@ HTML = """
   .card-date {
     font-size: 34px;
     color: var(--text-muted);
-    margin-bottom: 24px;
+    margin-bottom: 20px;
     line-height: 1.15;
     font-weight: 600;
+  }
+
+  .week-hours-block {
+    display: none;
+    margin: 0 0 22px;
+    padding: 16px 22px;
+    border: 1px solid var(--card-border);
+    background: rgba(0, 168, 236, 0.08);
+    align-items: center;
+    justify-content: space-between;
+    gap: 16px;
+  }
+
+  body.light .week-hours-block {
+    background: rgba(90, 159, 191, 0.10);
+  }
+
+  .week-hours-block.show {
+    display: flex;
+  }
+
+  .week-hours-label {
+    font-size: 28px;
+    color: var(--text-muted);
+    font-weight: 600;
+    letter-spacing: 1px;
+  }
+
+  .week-hours-value {
+    font-size: 42px;
+    color: var(--text-primary);
+    font-weight: bold;
+    line-height: 1;
   }
 
   .card-uid {
@@ -622,6 +660,10 @@ HTML = """
   <div class="scan-card">
     <div class="card-tag" id="card-tag">SCAN LOGGED</div>
     <div class="card-name" id="card-name">—</div>
+    <div class="week-hours-block" id="week-hours-block">
+      <span class="week-hours-label">Week total</span>
+      <span class="week-hours-value" id="card-week-hours">—</span>
+    </div>
     <div class="card-time" id="card-time">—</div>
     <div class="card-date" id="card-date">—</div>
     <div class="card-uid" id="card-uid">UID: —</div>
@@ -791,6 +833,15 @@ HTML = """
         document.getElementById("card-time").textContent = data.time;
         document.getElementById("card-date").textContent = data.date;
 
+        const weekBlock = document.getElementById("week-hours-block");
+        if (data.weekHours != null && data.weekHours !== "") {
+          document.getElementById("card-week-hours").textContent =
+            Number(data.weekHours).toFixed(2) + " hrs";
+          weekBlock.classList.add("show");
+        } else {
+          weekBlock.classList.remove("show");
+        }
+
         if (data.method === "pin") {
           document.getElementById("card-tag").textContent = "PIN LOGGED";
           const isUnknown =
@@ -855,13 +906,14 @@ def submit_pin():
         "deviceLabel": DEVICE_LABEL,
     }
 
-    name, err = submit_to_paarth(payload)
+    name, err, week_hours = submit_to_paarth(payload)
     if err or name in ("Config Error", "Network Error", "Server Error"):
         name = f"Unknown PIN ({pin})"
+        week_hours = None
         if err:
             print(f"Paarth PIN log failed, recorded locally: {err}", flush=True)
 
-    record_scan_result(name, pin=pin, uid=f"PIN-{pin}", method="pin")
+    record_scan_result(name, pin=pin, uid=f"PIN-{pin}", method="pin", week_hours=week_hours)
     return jsonify({"success": True, "name": name})
 
 
