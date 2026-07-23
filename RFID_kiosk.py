@@ -60,6 +60,29 @@ DEVICE_LABEL = (
     os.environ.get("DEVICE_LABEL") or os.environ.get("RFID_DEVICE_LABEL") or "shop-kiosk"
 ).strip()
 
+
+def is_valid_tenant_id(value):
+    value = str(value or "").strip()
+    return len(value) == 24 and all(ch in "0123456789abcdefABCDEF" for ch in value)
+
+
+def print_config_status():
+    print(f"Env file: {ENV_PATH}", flush=True)
+    print(f"Paarth API: {PAARTH_API_URL}", flush=True)
+
+    if not API_KEY or API_KEY == "your_api_key_here":
+        print("CONFIG ERROR: API_KEY is missing or still a placeholder in .env", flush=True)
+    if not TENANT_ID or TENANT_ID == "your_tenant_id_here":
+        print("CONFIG ERROR: TENANT_ID is missing or still a placeholder in .env", flush=True)
+    elif not is_valid_tenant_id(TENANT_ID):
+        print(f"CONFIG ERROR: TENANT_ID is not a valid 24-char id: {TENANT_ID!r}", flush=True)
+    else:
+        print(f"Tenant ID: {TENANT_ID}", flush=True)
+        print(
+            "This must match tenantId in Paarth (browser DevTools → Application → Local Storage).",
+            flush=True,
+        )
+
 # -------------------------
 # RFID hardware (Raspberry Pi only)
 # -------------------------
@@ -134,9 +157,34 @@ def normalize_pin(raw):
     return digits if len(digits) == 4 else ""
 
 
+def fetch_week_summary(display_name):
+    name = str(display_name or "").strip()
+    if not name or name.startswith("Unknown"):
+        return None, None
+
+    try:
+        response = requests.get(
+            f"{PAARTH_API_URL}/rfid/kiosk/week-summary",
+            params={"displayName": name},
+            headers=paarth_headers(),
+            timeout=10,
+        )
+        if response.status_code == 200:
+            data = response.json()
+            return data.get("weekTotalHours"), data.get("weekDays")
+        print(
+            f"Week summary fetch failed ({response.status_code}): {response.text[:200]}",
+            flush=True,
+        )
+    except Exception as e:
+        print("Week summary fetch error:", e, flush=True)
+
+    return None, None
+
+
 def submit_to_paarth(payload):
     if not TENANT_ID or not API_KEY:
-        return "Config Error", "Set TENANT_ID and API_KEY in .env", None
+        return "Config Error", "Set TENANT_ID and API_KEY in .env", None, None
 
     try:
         response = requests.post(
@@ -151,21 +199,35 @@ def submit_to_paarth(payload):
             scan = data.get("scan", {})
             name = scan.get("displayName", "Unknown")
             week_hours = scan.get("weekTotalHours")
+            week_days = scan.get("weekDays")
+            if not week_days:
+                fb_hours, fb_days = fetch_week_summary(name)
+                if week_hours is None and fb_hours is not None:
+                    week_hours = fb_hours
+                if fb_days:
+                    week_days = fb_days
             if week_hours is not None:
-                print(f"Logged in Paarth: {name} ({week_hours} hrs this week)", flush=True)
+                day_count = len(week_days) if isinstance(week_days, list) else 0
+                if day_count:
+                    print(
+                        f"Logged in Paarth: {name} ({week_hours} hrs, {day_count} day rows)",
+                        flush=True,
+                    )
+                else:
+                    print(f"Logged in Paarth: {name} ({week_hours} hrs this week)", flush=True)
             else:
                 print(f"Logged in Paarth: {name}", flush=True)
-            return name, None, week_hours
+            return name, None, week_hours, week_days
 
         print("Paarth error:", response.status_code, response.text, flush=True)
-        return "Server Error", response.text, None
+        return "Server Error", response.text, None, None
 
     except Exception as e:
         print("Network error:", e, flush=True)
-        return "Network Error", str(e), None
+        return "Network Error", str(e), None, None
 
 
-def record_scan_result(name, uid=None, pin=None, method="rfid", week_hours=None):
+def record_scan_result(name, uid=None, pin=None, method="rfid", week_hours=None, week_days=None):
     global latest_scan, scan_counter
 
     local_now = datetime.now()
@@ -181,6 +243,7 @@ def record_scan_result(name, uid=None, pin=None, method="rfid", week_hours=None)
         "status": "Scan logged",
         "method": method,
         "weekHours": week_hours,
+        "weekDays": week_days or [],
     }
 
 
@@ -210,8 +273,14 @@ def scan_loop():
                         "deviceLabel": DEVICE_LABEL,
                     }
 
-                    name, _err, week_hours = submit_to_paarth(payload)
-                    record_scan_result(name, uid=uid_string, method="rfid", week_hours=week_hours)
+                    name, _err, week_hours, week_days = submit_to_paarth(payload)
+                    record_scan_result(
+                        name,
+                        uid=uid_string,
+                        method="rfid",
+                        week_hours=week_hours,
+                        week_days=week_days,
+                    )
 
                     last_uid = uid_string
                     last_scan_time = now
@@ -248,7 +317,6 @@ HTML = """
     --glow-inner: rgba(0, 168, 236, 0.10);
     --glow-outer-strong: rgba(0, 168, 236, 0.65);
     --glow-inner-strong: rgba(0, 168, 236, 0.25);
-    --uid-color: #042a3a;
     --toggle-bg: rgba(0, 168, 236, 0.12);
     --toggle-border: rgba(0, 168, 236, 0.35);
     --pin-bg: #0a1216;
@@ -273,7 +341,6 @@ HTML = """
     --glow-inner: rgba(90, 159, 191, 0.08);
     --glow-outer-strong: rgba(90, 159, 191, 0.28);
     --glow-inner-strong: rgba(90, 159, 191, 0.12);
-    --uid-color: #9aa5b1;
     --toggle-bg: rgba(90, 159, 191, 0.12);
     --toggle-border: rgba(90, 159, 191, 0.35);
     --pin-bg: #ffffff;
@@ -491,7 +558,7 @@ HTML = """
     font-size: 42px;
     color: var(--text-bright);
     font-weight: bold;
-    margin-bottom: 25px;
+    margin-bottom: 18px;
   }
 
   .card-time {
@@ -510,11 +577,126 @@ HTML = """
     font-weight: 600;
   }
 
+  .scan-card.has-schedule .card-time {
+    font-size: 28px;
+    margin-top: 18px;
+    margin-bottom: 8px;
+  }
+
+  .scan-card.has-schedule .card-date {
+    font-size: 20px;
+    margin-bottom: 12px;
+  }
+
+  .week-section-title {
+    display: none;
+    font-size: 13px;
+    letter-spacing: 3px;
+    color: var(--text-muted);
+    text-transform: uppercase;
+    margin: 0 0 10px;
+    text-align: left;
+  }
+
+  .week-section-title.show {
+    display: block;
+  }
+
+  .week-schedule {
+    display: none;
+    margin: 0 0 14px;
+    text-align: left;
+    border: 1px solid var(--card-border);
+    border-radius: 8px;
+    overflow: hidden;
+    background: rgba(0, 0, 0, 0.03);
+  }
+
+  body.light .week-schedule {
+    background: rgba(0, 0, 0, 0.02);
+  }
+
+  .week-schedule.show {
+    display: block;
+  }
+
+  .week-schedule-head,
+  .week-schedule-row {
+    display: grid;
+    grid-template-columns: 58px 1fr 1fr 72px;
+    gap: 10px;
+    align-items: center;
+    font-size: 17px;
+    line-height: 1.25;
+    padding: 0 14px;
+  }
+
+  .week-schedule-head {
+    color: var(--text-muted);
+    font-size: 12px;
+    letter-spacing: 1px;
+    text-transform: uppercase;
+    padding-top: 12px;
+    padding-bottom: 10px;
+    border-bottom: 1px solid var(--card-border);
+    background: rgba(0, 168, 236, 0.06);
+  }
+
+  body.light .week-schedule-head {
+    background: rgba(90, 159, 191, 0.08);
+  }
+
+  .week-schedule-row {
+    color: var(--text-bright);
+    padding-top: 9px;
+    padding-bottom: 9px;
+    border-bottom: 1px solid var(--card-border);
+    font-variant-numeric: tabular-nums;
+  }
+
+  .week-schedule-row:last-child {
+    border-bottom: none;
+  }
+
+  .week-schedule-row:nth-child(even) {
+    background: rgba(255, 255, 255, 0.02);
+  }
+
+  body.light .week-schedule-row:nth-child(even) {
+    background: rgba(0, 0, 0, 0.02);
+  }
+
+  .week-schedule-row.empty {
+    color: var(--text-muted);
+  }
+
+  .week-schedule-row.empty .day-hours {
+    color: var(--text-muted);
+    font-weight: normal;
+  }
+
+  .week-schedule-head span:not(:first-child),
+  .week-schedule-row span:not(:first-child) {
+    text-align: right;
+    font-family: ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, monospace;
+  }
+
+  .week-schedule-row .day-name {
+    font-weight: 700;
+    letter-spacing: 0.5px;
+  }
+
+  .week-schedule-row .day-hours {
+    color: var(--text-primary);
+    font-weight: bold;
+  }
+
   .week-hours-block {
     display: none;
-    margin: 0 0 22px;
-    padding: 16px 22px;
+    margin: 0 0 4px;
+    padding: 14px 18px;
     border: 1px solid var(--card-border);
+    border-radius: 8px;
     background: rgba(0, 168, 236, 0.08);
     align-items: center;
     justify-content: space-between;
@@ -530,23 +712,62 @@ HTML = """
   }
 
   .week-hours-label {
-    font-size: 28px;
+    font-size: 22px;
     color: var(--text-muted);
     font-weight: 600;
     letter-spacing: 1px;
   }
 
   .week-hours-value {
-    font-size: 42px;
+    font-size: 32px;
     color: var(--text-primary);
     font-weight: bold;
     line-height: 1;
   }
 
-  .card-uid {
-    font-size: 10px;
-    color: var(--uid-color);
-    letter-spacing: 2px;
+  .scan-dismiss-x {
+    position: absolute;
+    top: 14px;
+    right: 14px;
+    width: 52px;
+    height: 52px;
+    border: 1px solid var(--card-border);
+    border-radius: 8px;
+    background: transparent;
+    color: var(--text-muted);
+    font-size: 28px;
+    line-height: 1;
+    cursor: pointer;
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    padding: 0;
+  }
+
+  .scan-dismiss-x:hover,
+  .scan-dismiss-x:active {
+    color: var(--text-bright);
+    border-color: var(--text-primary);
+    background: rgba(0, 168, 236, 0.08);
+  }
+
+  .scan-dismiss-btn {
+    display: inline-block;
+    margin: 4px 0 8px;
+    padding: 14px 36px;
+    border: 1px solid var(--pin-btn-border);
+    border-radius: 8px;
+    background: var(--pin-btn-bg);
+    color: var(--text-muted);
+    font-size: 16px;
+    letter-spacing: 3px;
+    cursor: pointer;
+  }
+
+  .scan-dismiss-btn:hover,
+  .scan-dismiss-btn:active {
+    color: var(--text-bright);
+    border-color: var(--text-primary);
   }
 
   .progress {
@@ -557,7 +778,7 @@ HTML = """
     width: 100%;
     background: var(--text-primary);
     transform-origin: left;
-    animation: shrink 4s linear forwards;
+    animation: shrink 6s linear forwards;
   }
 
   @keyframes shrink {
@@ -658,15 +879,23 @@ HTML = """
 
 <div class="overlay" id="overlay">
   <div class="scan-card">
+    <button class="scan-dismiss-x" id="scan-dismiss-x" type="button" aria-label="Dismiss">×</button>
     <div class="card-tag" id="card-tag">SCAN LOGGED</div>
     <div class="card-name" id="card-name">—</div>
+    <div class="week-section-title" id="week-section-title">This pay week</div>
+    <div class="week-schedule" id="week-schedule">
+      <div class="week-schedule-head">
+        <span>Day</span><span>In</span><span>Out</span><span>Hrs</span>
+      </div>
+      <div id="week-schedule-rows"></div>
+    </div>
     <div class="week-hours-block" id="week-hours-block">
       <span class="week-hours-label">Week total</span>
       <span class="week-hours-value" id="card-week-hours">—</span>
     </div>
     <div class="card-time" id="card-time">—</div>
     <div class="card-date" id="card-date">—</div>
-    <div class="card-uid" id="card-uid">UID: —</div>
+    <button class="scan-dismiss-btn" id="scan-dismiss-btn" type="button">CANCEL</button>
     <div class="progress" id="progress"></div>
   </div>
 </div>
@@ -735,8 +964,21 @@ HTML = """
 
   let lastScanId = null;
   let popupTimer = null;
+  const POPUP_MS = 6000;
+  const scanOverlay = document.getElementById("overlay");
   let pinValue = "";
   let pinSubmitting = false;
+
+  function closeScanPopup() {
+    scanOverlay.classList.remove("show");
+    clearTimeout(popupTimer);
+    popupTimer = null;
+    const progress = document.getElementById("progress");
+    progress.style.animation = "none";
+  }
+
+  document.getElementById("scan-dismiss-x").addEventListener("click", closeScanPopup);
+  document.getElementById("scan-dismiss-btn").addEventListener("click", closeScanPopup);
 
   const pinOverlay = document.getElementById("pin-overlay");
   const pinDisplay = document.getElementById("pin-display");
@@ -821,6 +1063,60 @@ HTML = """
     }
   }
 
+  function dayShortName(day) {
+    return String(day || "").slice(0, 3);
+  }
+
+  function formatClock(token) {
+    const value = String(token || "").trim();
+    if (!value || value === "0") return "—";
+    const digits = value.replace(/\D/g, "");
+    if (!digits) return "—";
+    return digits.padStart(4, "0");
+  }
+
+  function renderWeekSchedule(weekDays, weekHours) {
+    const card = document.querySelector(".scan-card");
+    const schedule = document.getElementById("week-schedule");
+    const sectionTitle = document.getElementById("week-section-title");
+    const rowsEl = document.getElementById("week-schedule-rows");
+    const weekBlock = document.getElementById("week-hours-block");
+
+    rowsEl.innerHTML = "";
+    schedule.classList.remove("show");
+    sectionTitle.classList.remove("show");
+    weekBlock.classList.remove("show");
+    card.classList.remove("has-schedule");
+
+    const hasDays = Array.isArray(weekDays) && weekDays.length > 0;
+    const hasHours = weekHours != null && weekHours !== "";
+
+    if (hasDays) {
+      weekDays.forEach((row) => {
+        const hours = Number(row.hours || 0);
+        const line = document.createElement("div");
+        line.className = "week-schedule-row" + (hours <= 0 ? " empty" : "");
+        line.innerHTML =
+          '<span class="day-name">' + dayShortName(row.day) + "</span>" +
+          "<span>" + formatClock(row.in) + "</span>" +
+          "<span>" + formatClock(row.out) + "</span>" +
+          '<span class="day-hours">' + hours.toFixed(2) + "</span>";
+        rowsEl.appendChild(line);
+      });
+      schedule.classList.add("show");
+      sectionTitle.classList.add("show");
+      card.classList.add("has-schedule");
+    }
+
+    if (hasHours) {
+      document.getElementById("card-week-hours").textContent =
+        Number(weekHours).toFixed(2) + " hrs";
+      weekBlock.classList.add("show");
+    }
+
+    return hasDays;
+  }
+
   async function checkScan() {
     try {
       const res = await fetch("/latest");
@@ -832,40 +1128,24 @@ HTML = """
         document.getElementById("card-name").textContent = data.name;
         document.getElementById("card-time").textContent = data.time;
         document.getElementById("card-date").textContent = data.date;
-
-        const weekBlock = document.getElementById("week-hours-block");
-        if (data.weekHours != null && data.weekHours !== "") {
-          document.getElementById("card-week-hours").textContent =
-            Number(data.weekHours).toFixed(2) + " hrs";
-          weekBlock.classList.add("show");
-        } else {
-          weekBlock.classList.remove("show");
-        }
+        const hasSchedule = renderWeekSchedule(data.weekDays, data.weekHours);
+        const popupMs = hasSchedule ? 12000 : POPUP_MS;
 
         if (data.method === "pin") {
           document.getElementById("card-tag").textContent = "PIN LOGGED";
-          const isUnknown =
-            data.name &&
-            (data.name.startsWith("Unknown PIN") || data.name.startsWith("Unknown tag"));
-          document.getElementById("card-uid").textContent = isUnknown
-            ? "PIN: " + data.pin + " (not mapped)"
-            : "PIN: ••••";
         } else {
           document.getElementById("card-tag").textContent = "SCAN LOGGED";
-          document.getElementById("card-uid").textContent = "UID: " + data.uid;
         }
 
         const progress = document.getElementById("progress");
         progress.style.animation = "none";
         progress.offsetHeight;
-        progress.style.animation = "shrink 4s linear forwards";
+        progress.style.animation = "shrink " + (popupMs / 1000) + "s linear forwards";
 
-        document.getElementById("overlay").classList.add("show");
+        scanOverlay.classList.add("show");
 
         clearTimeout(popupTimer);
-        popupTimer = setTimeout(() => {
-          document.getElementById("overlay").classList.remove("show");
-        }, 4000);
+        popupTimer = setTimeout(closeScanPopup, popupMs);
       }
     } catch (err) {
       console.log("Scan check failed:", err);
@@ -906,14 +1186,22 @@ def submit_pin():
         "deviceLabel": DEVICE_LABEL,
     }
 
-    name, err, week_hours = submit_to_paarth(payload)
+    name, err, week_hours, week_days = submit_to_paarth(payload)
     if err or name in ("Config Error", "Network Error", "Server Error"):
         name = f"Unknown PIN ({pin})"
         week_hours = None
+        week_days = None
         if err:
             print(f"Paarth PIN log failed, recorded locally: {err}", flush=True)
 
-    record_scan_result(name, pin=pin, uid=f"PIN-{pin}", method="pin", week_hours=week_hours)
+    record_scan_result(
+        name,
+        pin=pin,
+        uid=f"PIN-{pin}",
+        method="pin",
+        week_hours=week_hours,
+        week_days=week_days,
+    )
     return jsonify({"success": True, "name": name})
 
 
@@ -941,6 +1229,8 @@ if __name__ == "__main__":
         init_rfid_reader()
     else:
         print("Kiosk-only mode — RFID reader disabled.", flush=True)
+
+    print_config_status()
 
     try:
         if HAS_RFID:
