@@ -83,9 +83,20 @@ def print_config_status():
             flush=True,
         )
 
+
 # -------------------------
-# RFID hardware (Raspberry Pi only)
+# Raspberry Pi system helpers
 # -------------------------
+CPU_TEMP_PATH = "/sys/class/thermal/thermal_zone0/temp"
+
+
+def get_cpu_temp():
+    try:
+        with open(CPU_TEMP_PATH, encoding="utf-8") as f:
+            return round(int(f.read().strip()) / 1000.0, 1)
+    except (OSError, ValueError, TypeError):
+        return None
+
 HAS_RFID = False
 reader = None
 GPIO = None
@@ -396,6 +407,80 @@ HTML = """
     letter-spacing: 1px;
     padding: 8px 14px;
     cursor: pointer;
+  }
+
+  .system-health {
+    position: fixed;
+    right: 28px;
+    bottom: 24px;
+    z-index: 110;
+    pointer-events: none;
+    min-width: 132px;
+    padding: 12px 14px 14px;
+    border: 1px solid var(--card-border);
+    background: var(--toggle-bg);
+    box-shadow: 0 0 18px var(--card-shadow);
+    text-align: left;
+  }
+
+  .system-health-title {
+    font-size: 10px;
+    letter-spacing: 3px;
+    color: var(--text-muted);
+    margin-bottom: 10px;
+  }
+
+  .system-health-label {
+    font-size: 10px;
+    letter-spacing: 2px;
+    color: var(--text-muted);
+    margin-bottom: 4px;
+  }
+
+  .system-health-value {
+    font-size: 22px;
+    font-weight: bold;
+    letter-spacing: 1px;
+    line-height: 1.1;
+    color: var(--text-primary);
+    text-shadow: 0 0 12px rgba(0, 168, 236, 0.18);
+  }
+
+  .system-health-value.temp-ok {
+    color: #3ecf8e;
+    text-shadow: 0 0 12px rgba(62, 207, 142, 0.35);
+  }
+
+  .system-health-value.temp-warn {
+    color: #e6c84b;
+    text-shadow: 0 0 12px rgba(230, 200, 75, 0.35);
+  }
+
+  .system-health-value.temp-hot {
+    color: #ff5f5f;
+    text-shadow: 0 0 14px rgba(255, 95, 95, 0.4);
+  }
+
+  .system-health-value.temp-unavailable {
+    font-size: 13px;
+    letter-spacing: 1px;
+    color: var(--text-muted);
+    text-shadow: none;
+  }
+
+  body.light .system-health-value.temp-ok {
+    color: #1f9d63;
+    text-shadow: none;
+  }
+
+  body.light .system-health-value.temp-warn {
+    color: #9a7d12;
+    text-shadow: none;
+  }
+
+  body.light .system-health-value.temp-hot {
+    color: #c62828;
+    text-shadow: none;
   }
 
   .clock-block {
@@ -877,6 +962,12 @@ HTML = """
   <div class="prompt-sub">WAITING FOR EMPLOYEE SCAN · TAP LOGO FOR PIN</div>
 </div>
 
+<aside class="system-health" id="system-health" aria-label="System health">
+  <div class="system-health-title">SYSTEM HEALTH</div>
+  <div class="system-health-label">CPU TEMP</div>
+  <div class="system-health-value temp-unavailable" id="cpu-temp-value">—</div>
+</aside>
+
 <div class="overlay" id="overlay">
   <div class="scan-card">
     <button class="scan-dismiss-x" id="scan-dismiss-x" type="button" aria-label="Dismiss">×</button>
@@ -1153,6 +1244,44 @@ HTML = """
   }
 
   setInterval(checkScan, 400);
+
+  const cpuTempEl = document.getElementById("cpu-temp-value");
+
+  function applyCpuTempClass(el, level) {
+    el.classList.remove("temp-ok", "temp-warn", "temp-hot", "temp-unavailable");
+    if (level) el.classList.add(level);
+  }
+
+  async function updateSystemHealth() {
+    try {
+      const res = await fetch("/system-status");
+      const data = await res.json();
+      const temp = data.cpuTemp;
+
+      if (temp == null || temp === "") {
+        cpuTempEl.textContent = "Unavailable";
+        applyCpuTempClass(cpuTempEl, "temp-unavailable");
+        return;
+      }
+
+      const value = Number(temp);
+      cpuTempEl.textContent = value.toFixed(1) + "°C";
+
+      if (value >= 70) {
+        applyCpuTempClass(cpuTempEl, "temp-hot");
+      } else if (value >= 55) {
+        applyCpuTempClass(cpuTempEl, "temp-warn");
+      } else {
+        applyCpuTempClass(cpuTempEl, "temp-ok");
+      }
+    } catch (err) {
+      cpuTempEl.textContent = "Unavailable";
+      applyCpuTempClass(cpuTempEl, "temp-unavailable");
+    }
+  }
+
+  updateSystemHealth();
+  setInterval(updateSystemHealth, 2000);
 </script>
 
 </body>
@@ -1168,6 +1297,12 @@ def home():
 @app.route("/latest")
 def latest():
     return jsonify(latest_scan)
+
+
+@app.route("/system-status")
+def system_status():
+    cpu_temp = get_cpu_temp()
+    return jsonify({"cpuTemp": cpu_temp})
 
 
 @app.route("/pin", methods=["POST"])
